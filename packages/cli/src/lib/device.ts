@@ -47,11 +47,13 @@ export function deviceName(): string {
   }
 }
 
-/** Header set mirroring the reference client (agent-cli). */
+/** Header set mirroring the reference client (agent-cli).
+ * ok-client-version is the agent-cli PROTOCOL version this implementation
+ * targets (backend gates new flows on >= 4.6.0); not the snowagent release. */
 export function clientHeaders(): Record<string, string> {
   return {
     "Content-Type": "application/json",
-    "ok-client-version": "0.1.0",
+    "ok-client-version": "4.6.3",
     "Ok-Access-Client-type": "agent-cli",
     platform: "agent-cli",
     "device-id": deviceId(),

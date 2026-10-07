@@ -1,4 +1,5 @@
 import {
+  aieco,
   createAndFund,
   createAndFundConfirmStatus,
   myTasks,
@@ -6,70 +7,102 @@ import {
   taskDetail,
   type CreateTaskInput,
 } from "./priapi.js";
+import { signEscrow } from "./escrow.js";
 import { signMessage } from "./sign.js";
 import { requireSession } from "./session.js";
 
-/**
- * Deterministic serialization of the escrow (uopData) parameters for the
- * wallet signature. Mirrors the reference `sign_uop` semantics: the signature
- * authorizes exactly these escrow terms. Verify against live
- * createAndFundConfirmStatus responses during integration.
- */
-function escrowSignMessage(jobId: string, taskSalt: string, uop: any): string {
-  const fields = [
-    "receiver", "evaluator", "currency", "recipient", "amount",
-    "submitWindow", "disputeWindow", "evaluateWindow", "completedWindow",
-    "hook", "hookData", "salt", "expiredAt",
-  ];
-  const lines = [`SnowAgent task escrow authorization`, `jobId: ${jobId}`, `taskSalt: ${taskSalt}`];
-  for (const f of fields) lines.push(`${f}: ${uop?.[f] ?? ""}`);
-  return lines.join("\n");
+/** Resolve fee token address/amount from the service catalog when not given. */
+async function resolveServiceFee(serviceId: string): Promise<{ address: string; amount: string }> {
+  const { priapi } = await import("./priapi.js");
+  const r: any = await priapi(`/priapi/v1/aieco/task/asp/service/search`, {
+    body: { sid: serviceId, limit: 1 },
+  });
+  const s = r?.services?.[0];
+  if (!s) throw new Error(`service ${serviceId} not found`);
+  return { address: s.feeToken, amount: String(s.feeAmount) };
 }
 
 export async function createTask(input: CreateTaskInput): Promise<{ jobId: string }> {
   requireSession();
 
-  // 1. confirm → jobId + taskSalt + uopData (escrow terms)
-  const confirm = await createAndFundConfirmStatus({
+  // 1. confirm → escrow terms (jobId, taskSalt, provider/receiver/evaluator/...)
+  const c: any = await createAndFundConfirmStatus({
     providerAgentId: input.providerAgentId,
     tokenSymbol: input.tokenSymbol,
     amount: input.tokenAmount,
     chainId: input.chainId,
     serviceId: input.serviceId,
   });
-  const jobId: string = confirm.jobId ?? confirm.data?.jobId;
-  const taskSalt: string = confirm.taskSalt ?? confirm.data?.taskSalt ?? "";
-  const uopData = confirm.uopData ?? confirm.data?.uopData;
-  if (!jobId || !uopData) throw new Error("createAndFundConfirmStatus returned no jobId/uopData");
+  for (const k of ["jobId", "taskSalt", "provider", "receiver", "evaluator", "currency", "recipient", "amount", "salt", "expiredAt"]) {
+    if (c[k] === undefined) throw new Error(`createAndFundConfirmStatus missing ${k}`);
+  }
 
-  // 2. wallet signs the escrow authorization (TEE — key never leaves backend)
-  const message = escrowSignMessage(jobId, taskSalt, uopData);
-  const { signature } = await signMessage({ message });
-  const validAfter = String(Math.floor(Date.now() / 1000));
-  const validBefore = String(uopData.expiredAt ?? Math.floor(Date.now() / 1000) + 3600);
+  // 2. TEE-sign the EIP-3009 escrow authorization (key never leaves backend)
+  const auth = await signEscrow(
+    {
+      from: "", // resolved inside signEscrow from the wallet
+      provider: c.hook, // provider_for_escrow_nonce() == hook
+      receiver: c.receiver,
+      arbitrator: c.evaluator,
+      currency: c.currency,
+      amount: c.amount,
+      submitWindow: c.submitWindow,
+      disputeWindow: c.disputeWindow,
+      arbitrationWindow: c.evaluateWindow,
+      terminationWindow: c.completedWindow,
+      hook: c.hook,
+      hookData: c.hookData,
+      salt: c.salt,
+      chainId: input.chainId,
+      escrowAddress: c.recipient,
+    },
+    String(c.expiredAt)
+  );
 
-  // 3. create + fund
+  // 3. fee token info (auto-resolve when not provided)
+  let serviceTokenAddress = input.serviceTokenAddress;
+  let serviceTokenAmount = input.serviceTokenAmount;
+  if (!serviceTokenAddress || !serviceTokenAmount) {
+    const fee = await resolveServiceFee(input.serviceId);
+    serviceTokenAddress = serviceTokenAddress ?? fee.address;
+    serviceTokenAmount = serviceTokenAmount ?? fee.amount;
+  }
+
+  // 4. create + fund (visibility: public=0/private=1; chainId numeric; serviceParams as JSON string)
+  const visibility = (input.visibility ?? "public") === "private" ? 1 : 0;
   const body: Record<string, unknown> = {
-    visibility: input.visibility ?? "public",
-    jobId,
-    taskSalt,
-    signature,
-    validAfter: Number(validAfter),
-    validBefore: Number(validBefore),
+    visibility,
+    jobId: c.jobId,
+    taskSalt: c.taskSalt,
+    signature: auth.signature,
+    validAfter: Number(auth.validAfter),
+    validBefore: Number(auth.validBefore),
     title: input.title,
     description: input.description,
     paymentTokenSymbol: input.tokenSymbol,
     paymentTokenAmount: input.tokenAmount,
-    chainId: input.chainId,
+    chainId: Number(input.chainId),
     providerAgentId: input.providerAgentId,
     serviceId: input.serviceId,
-    serviceParams: input.serviceParams ?? {},
+    serviceParams: JSON.stringify(input.serviceParams ?? {}),
+    serviceTokenAddress,
+    serviceTokenAmount,
   };
-  if (input.serviceTokenAddress) body.serviceTokenAddress = input.serviceTokenAddress;
-  if (input.serviceTokenAmount) body.serviceTokenAmount = input.serviceTokenAmount;
+  const res: any = await createAndFund(body);
+  // validate like the reference: jobId must match, uopData present
+  const createdJobId: string = res?.jobId ?? "";
+  if (!createdJobId || createdJobId !== c.jobId) {
+    throw new Error(`createAndFund returned unexpected jobId: ${createdJobId || "<empty>"}`);
+  }
+  if (!res.uopData) throw new Error("createAndFund response missing uopData");
+  const bizType = Number(res.type ?? 201);
+  if (res.type !== undefined && bizType !== 201) {
+    throw new Error(`unexpected bizType ${res.type}, expected 201`);
+  }
 
-  const res = await createAndFund(body);
-  const createdJobId: string = res.jobId ?? res.data?.jobId ?? jobId;
+  // 5. broadcast — this is what makes the task live
+  const { broadcastTask } = await import("./broadcast.js");
+  await broadcastTask(createdJobId, res.uopData, bizType);
   return { jobId: createdJobId };
 }
 

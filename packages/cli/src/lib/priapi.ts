@@ -15,6 +15,9 @@ interface ApiOptions {
   body?: unknown;
   /** skip auth header (login polling) */
   noAuth?: boolean;
+  /** extra headers merged over the client header set */
+  extraHeaders?: Record<string, string>;
+  _retried?: boolean;
 }
 
 /**
@@ -26,7 +29,7 @@ interface ApiOptions {
  */
 export async function priapi<T = any>(path: string, opts: ApiOptions = {}): Promise<T> {
   const url = path.startsWith("http") ? path : baseUrl() + path;
-  const headers: Record<string, string> = { ...clientHeaders() };
+  const headers: Record<string, string> = { ...clientHeaders(), ...(opts.extraHeaders ?? {}) };
   if (!opts.noAuth) {
     const s = loadSession();
     if (!s?.accessToken) throw new Error("not logged in — run `snowagent wallet login` first");
@@ -50,10 +53,34 @@ export async function priapi<T = any>(path: string, opts: ApiOptions = {}): Prom
   }
   // OKX envelope: {code, msg, data}
   const code = String(json?.code ?? "");
+  if (code === "10008" && !opts.noAuth && !(opts as any)._retried) {
+    // access token expired → refresh once and retry
+    await refreshAccessToken();
+    return priapi<T>(path, { ...opts, _retried: true } as ApiOptions);
+  }
   if (code !== "0" && code !== "00000") {
     throw new PriapiError(code || `http-${res.status}`, String(json?.msg ?? "unknown error"));
   }
   return (json.data ?? json) as T;
+}
+
+/** POST /priapi/v5/wallet/agentic/auth/refresh — rotates the access token. */
+export async function refreshAccessToken(): Promise<void> {
+  const s = loadSession();
+  if (!s?.refreshToken) throw new Error("session expired — run `snowagent wallet login` again");
+  const data: any = await priapi(`/priapi/v5/wallet/agentic/auth/refresh`, {
+    method: "POST",
+    body: { refreshToken: s.refreshToken },
+    noAuth: true,
+  });
+  const item = Array.isArray(data) ? data[0] : data;
+  if (!item?.accessToken) throw new Error("token refresh failed — run `snowagent wallet login` again");
+  saveSession({
+    ...s,
+    accessToken: item.accessToken,
+    refreshToken: item.refreshToken ?? s.refreshToken,
+    expiresAt: item.sessionKeyExpireAt ?? item.expireAt ?? s.expiresAt,
+  });
 }
 
 // ── session/result polling (login) ──────────────────────────────────────────
@@ -83,6 +110,39 @@ export async function walletAddresses(): Promise<any> {
 }
 
 // ── agent commerce (user side) ──────────────────────────────────────────────
+// aieco endpoints need: `agenticId` header (the USER's agent id) + sessionCert
+// injected into the JSON body — mirrors the reference TaskApiClient.
+
+/** The current account's user-role agent id (used as `agenticId`). */
+export async function resolveUserAgentId(): Promise<string> {
+  const { evmAddress } = await import("./session.js");
+  const owner = evmAddress();
+  if (!owner) throw new Error("no EVM address — run `snowagent wallet login` first");
+  const q = new URLSearchParams({ chainIndex: "196", ownerAddress: owner, role: "1", pageSize: "100" });
+  const data: any = await priapi(`/priapi/v5/wallet/agentic/agent/agent-list?${q}`);
+  // response: [{list: [{accountName, agentList: [...]}]}]
+  const outer = Array.isArray(data) ? data : [data];
+  const agents: any[] = [];
+  for (const g of outer) {
+    for (const grp of g?.list ?? []) {
+      for (const a of grp?.agentList ?? []) agents.push(a);
+      if (grp?.agentId) agents.push(grp);
+    }
+    for (const a of g?.agentList ?? []) agents.push(a);
+  }
+  const user = agents.find((a: any) => Number(a.role) === 1) ?? agents[0];
+  if (!user?.agentId) throw new Error("no user agent identity on this account");
+  return String(user.agentId);
+}
+
+/** aieco POST with identity headers + sessionCert in body. */
+export async function aieco<T = any>(path: string, body: Record<string, unknown>): Promise<T> {
+  const s = loadSession();
+  const agentId = await resolveUserAgentId();
+  const withCert = { ...body };
+  if (!withCert.sessionCert && s?.sessionCert) withCert.sessionCert = s.sessionCert;
+  return priapi<T>(path, { body: withCert, extraHeaders: { agenticId: agentId } });
+}
 export interface CreateTaskInput {
   title: string;
   description: string;
@@ -104,29 +164,36 @@ export async function createAndFundConfirmStatus(input: {
   chainId: string;
   serviceId: string;
 }): Promise<any> {
-  return priapi(`/priapi/v1/aieco/task/createAndFundConfirmStatus`, { body: input });
+  return aieco(`/priapi/v1/aieco/task/createAndFundConfirmStatus`, { ...input });
 }
 
 export async function createAndFund(body: Record<string, unknown>): Promise<any> {
-  return priapi(`/priapi/v1/aieco/task/createAndFund`, { body });
+  return aieco(`/priapi/v1/aieco/task/createAndFund`, body);
 }
 
 export async function myTasks(params: { page?: number; pageSize?: number; statusType?: number } = {}): Promise<any> {
+  const agentId = await resolveUserAgentId();
   const q = new URLSearchParams({
     page: String(params.page ?? 1),
     pageSize: String(params.pageSize ?? 20),
     statusType: String(params.statusType ?? 1),
   });
-  return priapi(`/priapi/v1/aieco/task/my?${q}`);
+  return priapi(`/priapi/v1/aieco/task/my?${q}`, { extraHeaders: { agenticId: agentId } });
 }
 
 export async function taskDetail(jobId: string): Promise<any> {
-  return priapi(`/priapi/v1/aieco/task/${encodeURIComponent(jobId)}/detail`);
+  const agentId = await resolveUserAgentId();
+  return priapi(`/priapi/v1/aieco/task/${encodeURIComponent(jobId)}/detail`, {
+    extraHeaders: { agenticId: agentId },
+  });
 }
 
 export async function providerConfirmStatus(jobId: string, q: Record<string, string>): Promise<any> {
+  const agentId = await resolveUserAgentId();
   const qs = new URLSearchParams(q);
-  return priapi(`/priapi/v1/aieco/task/${encodeURIComponent(jobId)}/providerConfirmStatus?${qs}`);
+  return priapi(`/priapi/v1/aieco/task/${encodeURIComponent(jobId)}/providerConfirmStatus?${qs}`, {
+    extraHeaders: { agenticId: agentId },
+  });
 }
 
 /**

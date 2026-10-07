@@ -10,16 +10,25 @@ const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "he
  * Mirrors the reference `ed25519_sign_eip191`.
  */
 export function sessionSignature(message: string, seedB64: string): string {
-  const data = Buffer.from(message, "utf8");
+  return sessionSignatureBytes(Buffer.from(message, "utf8"), seedB64);
+}
+
+/** eip191 variant over raw bytes (for hex-encoded hashes). */
+export function sessionSignatureBytes(data: Buffer, seedB64: string): string {
   const prefix = Buffer.from(`\x19Ethereum Signed Message:\n${data.length}`, "utf8");
   const hash = keccak256(Buffer.concat([prefix, data]));
+  return ed25519SignRawBytes(Buffer.from(hash), seedB64);
+}
+
+/** base64(ed25519_sign(seed, bytes)) — raw, no eip191 wrapper. */
+export function ed25519SignRawBytes(hashBytes: Buffer, seedB64: string): string {
   const seed = Buffer.from(seedB64, "base64");
   const key = createPrivateKey({
     key: Buffer.concat([ED25519_PKCS8_PREFIX, seed]),
     format: "der",
     type: "pkcs8",
   });
-  const sig = cryptoSign(null, Buffer.from(hash), key);
+  const sig = cryptoSign(null, hashBytes, key);
   return Buffer.from(sig).toString("base64");
 }
 
