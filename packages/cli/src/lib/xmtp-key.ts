@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { xmtpDir } from "./home.js";
 import { evmAddressFromPubkey, toHex } from "./keccak.js";
-import { signMessage } from "./priapi.js";
+import { signMessage } from "./sign.js";
 import { requireSession } from "./session.js";
 
 const KEY_FILE = "identity.key"; // hex secp256k1 private key, 0o600

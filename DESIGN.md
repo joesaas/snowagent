@@ -65,17 +65,30 @@ snowagent/
 
 ### 登录（social login device flow）
 
-1. 本地生成 `authSessionId`（uuid）+ x25519 临时密钥对。
+1. 本地生成 `authSessionId`（uuid）+ x25519 临时密钥对；`tempPubKey` =
+   base64(**裸 32 字节公钥**，不是 SPKI DER——传 DER 会报 `tempPk must be 32 bytes`)。
 2. 拼登录 URL：`<base>/account/sociallogin?authSessionId=..&tempPubKey=..&clientType=agent-cli`，
    打印给用户在浏览器完成登录。
-3. 轮询 `session/result`（2s 间隔，5min 超时；后端 code `10018` = 未完成）。
-4. 拿到 `accessToken`/`refreshToken` → 存 `~/.snowagent/session.json`（600 权限）。
+3. 轮询 `POST /priapi/v5/wallet/agentic/auth/session/result`（body
+   `{"authSessionId"}`，2s 间隔，5min 超时；后端 code `10018` = 未完成；
+   返回 `data` 是数组，取 `data[0]` 即 VerifyResponse）。
+4. 用 x25519 私钥 HPKE 解密 `encryptedSessionSk`
+  （suite = DHKEM(X25519,HKDF-SHA256)+HKDF-SHA256+AES-256-GCM，
+   info = `okx-tee-sign`，wire = enc(32B)||ciphertext；已用参考实现的
+   known-vector 验证）得到 Ed25519 会话签名种子。
+5. 存 `~/.snowagent/session.json`（accessToken/refreshToken/sessionCert/
+   sessionSeedB64/saTeeId，600 权限）+ `~/.snowagent/wallets.json`
+  （accounts + address_list，`wallet addresses` 从本地读并按链分组）。
 
 ### 签名（TEE 托管钱包）
 
-- 私钥不出 TEE。签名走后端：`POST /priapi/v5/wallet/agentic/pre-transaction/sign-msg`
- （先 `gen-msg-hash` 取待签哈希，视消息类型而定）。
+- 私钥不出 TEE。签名走后端：`POST /priapi/v5/wallet/agentic/pre-transaction/sign-msg`，
+  body 形如 `{chainIndex, from, sessionCert,
+  payload:[{signType:"personalSign", message:{value}, sessionSignature}]}`，
+  其中 `sessionSignature = base64(Ed25519_sign(seed,
+  keccak256("\x19Ethereum Signed Message:\n"+len+message)))`。
 - `snowagent wallet sign --message <text>` → personalSign，返回签名 hex。
+- `message.value` 编码：EVM 直接原文，Solana（chain 501）用 base58。
 
 ### 创建任务（one-time）
 

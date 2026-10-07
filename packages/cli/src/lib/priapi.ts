@@ -1,5 +1,5 @@
 import { baseUrl } from "./home.js";
-import { loadSession, saveSession } from "./session.js";
+import { loadSession, saveSession, groupedAddresses } from "./session.js";
 
 export class PriapiError extends Error {
   code: string;
@@ -56,35 +56,29 @@ export async function priapi<T = any>(path: string, opts: ApiOptions = {}): Prom
 }
 
 // ── session/result polling (login) ──────────────────────────────────────────
+// POST /priapi/v5/wallet/agentic/auth/session/result  {authSessionId}
+// → data is an array; data[0] is the VerifyResponse. code=10018 → pending.
 export async function sessionResult(authSessionId: string): Promise<any> {
-  return priapi(`/priapi/v5/wallet/agentic/session/result?authSessionId=${encodeURIComponent(authSessionId)}`, {
+  const data: any = await priapi(`/priapi/v5/wallet/agentic/auth/session/result`, {
+    method: "POST",
+    body: { authSessionId },
     noAuth: true,
   });
+  const arr = Array.isArray(data) ? data : data?.data;
+  if (Array.isArray(arr) && arr.length > 0) return arr[0];
+  return data;
 }
 
 // ── wallet ──────────────────────────────────────────────────────────────────
 export async function walletAccounts(): Promise<any> {
-  return priapi(`/priapi/v5/wallet/agentic/account/list`);
+  return priapi(`/priapi/v5/wallet/agentic/account/list`, { method: "POST", body: {} });
 }
 
+/** Addresses come from the local wallet store (populated at login), like the reference. */
 export async function walletAddresses(): Promise<any> {
-  return priapi(`/priapi/v5/wallet/agentic/account/addresses`);
-}
-
-/** TEE personalSign of an arbitrary message. */
-export async function signMessage(params: {
-  accountId?: string;
-  message: string;
-  chainIndex?: string;
-}): Promise<{ signature: string }> {
-  return priapi(`/priapi/v5/wallet/agentic/pre-transaction/sign-msg`, {
-    body: {
-      accountId: params.accountId,
-      message: params.message,
-      chainIndex: params.chainIndex ?? "1",
-      signType: "personalSign",
-    },
-  });
+  const g = groupedAddresses();
+  if (!g) throw new Error("no wallet data — run `snowagent wallet login` first");
+  return g;
 }
 
 // ── agent commerce (user side) ──────────────────────────────────────────────
@@ -134,9 +128,39 @@ export async function providerConfirmStatus(jobId: string, q: Record<string, str
   return priapi(`/priapi/v1/aieco/task/${encodeURIComponent(jobId)}/providerConfirmStatus?${qs}`);
 }
 
-/** Communication readiness check (mirrors `onchainos agent communication-check`). */
+/**
+ * Communication readiness check. The reference implements this as a LOCAL
+ * advisory check of the A2A runtime (not a priapi call): XMTP identity
+ * present + daemon running.
+ */
 export async function communicationCheck(): Promise<any> {
-  return priapi(`/priapi/v1/aieco/agent/communication-check`);
+  const { existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { homedir } = await import("node:os");
+  const home = process.env.SNOWAGENT_HOME ?? join(homedir(), ".snowagent");
+  const identityOk = existsSync(join(home, "xmtp", "identity.key"));
+  let daemonPid: number | null = null;
+  try {
+    const pidFile = join(home, "a2a", "daemon.pid");
+    if (existsSync(pidFile)) {
+      const { readFileSync } = await import("node:fs");
+      const pid = Number(readFileSync(pidFile, "utf8").trim());
+      try {
+        process.kill(pid, 0);
+        daemonPid = pid;
+      } catch { /* not running */ }
+    }
+  } catch { /* noop */ }
+  const ok = identityOk && daemonPid !== null;
+  return {
+    ok,
+    note: ok
+      ? "communication ready"
+      : "not ready — run `snowagent xmtp init` and `snowagent-a2a daemon start`",
+    xmtpIdentity: identityOk,
+    daemon: daemonPid !== null,
+    daemonPid,
+  };
 }
 
 export async function saveSessionTokens(data: any): Promise<void> {
@@ -145,6 +169,9 @@ export async function saveSessionTokens(data: any): Promise<void> {
     ...s,
     accessToken: data.accessToken,
     refreshToken: data.refreshToken ?? s.refreshToken,
+    sessionCert: data.sessionCert ?? (s as any).sessionCert,
+    sessionSeedB64: data.sessionSeedB64 ?? (s as any).sessionSeedB64,
+    saTeeId: data.saTeeId ?? (s as any).saTeeId,
     expiresAt: data.expiresAt ?? data.expireAt,
     accountId: data.accountId ?? s.accountId,
     accountName: data.accountName ?? s.accountName,

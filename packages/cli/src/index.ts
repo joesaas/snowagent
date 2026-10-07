@@ -2,7 +2,8 @@
 import { Command } from "commander";
 import { socialLogin } from "./lib/login.js";
 import { clearSession, loadSession } from "./lib/session.js";
-import { signMessage, walletAccounts, walletAddresses, communicationCheck } from "./lib/priapi.js";
+import { walletAccounts, walletAddresses, communicationCheck } from "./lib/priapi.js";
+import { signMessage } from "./lib/sign.js";
 import { acceptTask, createTask, listTasks, taskStatus } from "./lib/task.js";
 import { identityAddress, initIdentity } from "./lib/xmtp-key.js";
 

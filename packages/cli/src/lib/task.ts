@@ -3,10 +3,10 @@ import {
   createAndFundConfirmStatus,
   myTasks,
   providerConfirmStatus,
-  signMessage,
   taskDetail,
   type CreateTaskInput,
 } from "./priapi.js";
+import { signMessage } from "./sign.js";
 import { requireSession } from "./session.js";
 
 /**
@@ -115,14 +115,13 @@ export async function acceptTask(jobId: string): Promise<any> {
     // provider may not have quoted; acceptance can still proceed
   }
 
-  const { signMessage: sign } = await import("./priapi.js");
   const message = [
     "SnowAgent task accept",
     `jobId: ${jobId}`,
     `providerAgentId: ${providerAgentId}`,
     `amount: ${amount} ${tokenSymbol}`,
   ].join("\n");
-  const { signature } = await sign({ message });
+  const { signature } = await signMessage({ message });
 
   const { priapi } = await import("./priapi.js");
   return priapi(`/priapi/v1/aieco/task/${encodeURIComponent(jobId)}/accept`, {
