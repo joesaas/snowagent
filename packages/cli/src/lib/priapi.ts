@@ -1,5 +1,6 @@
 import { baseUrl } from "./home.js";
 import { loadSession, saveSession, groupedAddresses } from "./session.js";
+import { clientHeaders } from "./device.js";
 
 export class PriapiError extends Error {
   code: string;
@@ -25,7 +26,7 @@ interface ApiOptions {
  */
 export async function priapi<T = any>(path: string, opts: ApiOptions = {}): Promise<T> {
   const url = path.startsWith("http") ? path : baseUrl() + path;
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = { ...clientHeaders() };
   if (!opts.noAuth) {
     const s = loadSession();
     if (!s?.accessToken) throw new Error("not logged in — run `snowagent wallet login` first");

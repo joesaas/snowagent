@@ -79,7 +79,8 @@ export async function signMessage(params: {
     ],
   };
   const raw = await priapi(`/priapi/v5/wallet/agentic/pre-transaction/sign-msg`, { body });
+  const first = Array.isArray(raw) ? raw[0] : raw;
   const signature: string =
-    (raw as any)?.signature ?? (raw as any)?.signatures?.[0] ?? (raw as any)?.data?.signature ?? "";
+    first?.signature ?? (raw as any)?.signature ?? (raw as any)?.signatures?.[0] ?? "";
   return { signature, raw };
 }
