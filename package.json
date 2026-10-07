@@ -1,0 +1,1 @@
+{"description":"User-side OKX.AI agent task toolkit: wallet login, task creation, XMTP messaging, deliverable acceptance.","engines":{"node":">=22"},"name":"snowagent","private":true,"scripts":{"build":"npm run build --workspaces","install:all":"bash ./install.sh","smoke":"bash ./scripts/smoke.sh"},"version":"0.1.0","workspaces":["packages/cli","packages/a2a"]}
